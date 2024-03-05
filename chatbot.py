@@ -3,12 +3,29 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 import telebot
-from celery import Celery
+from celery import Celery, chain
+import requests
+from requests.exceptions import RequestException
+import humanize
+import pytz
+from datetime import datetime
 
 load_dotenv()
 app = Celery('chatbot', broker=os.getenv('CELERY_BROKER_URL'))
 
-    
+bandwagon_url = os.getenv('BANDWAGON_URL')
+bandwagon_params = {
+    'veid': os.getenv('BANDWAGON_VEID'),
+    'api_key': os.getenv('BANDWAGON_API_TOKEN')
+}
+
+jms_url = os.getenv('JMS_URL')
+jms_params = {
+    'service': os.getenv('JMS_SERVICE'),
+    'id': os.getenv('JMS_ID')
+}
+
+
 openapi_key = os.getenv('OPEN_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
@@ -20,9 +37,13 @@ client = OpenAI(
 
 # Store the last 10 conversations for each user
 conversations = {}
+# dict to store chat model parameters
+chat_paras = {}
 
 
 SYSTEM_PROMPT = os.getenv('SYSTEM_PROMPT')
+
+
 
 def conversation_tracking(text_message, user_id):
     """
@@ -86,7 +107,10 @@ def handle_image(message):
     caption = f"Powered by Dall-E" 
 
     #number = message.text[7:10]
-    prompt = message.text.replace("/create", "").strip()
+    if message.text.startswith("/image"):
+        prompt = message.text.replace("/image", "").strip()
+    else:
+        prompt = message.text.replace("/create", "").strip()
     print(f"message= {message.text}")
     print(f"prompt = {prompt}")
     numbers = 1 # Dall-E-3 api only support number = 1
@@ -121,6 +145,67 @@ def generate_response_chat(message_list):
     )
     return completion.choices[0].message.content
 
+@app.task
+def get_jms_data_usage(data):
+    servicename = 'JMS'
+    used_bw = data['bw_counter_b']
+    total_bw = data['monthly_bw_limit_b']
+    date_next_reset = data['bw_reset_day_of_month']
+    date_next_reset_str = f"Date Next Reset: {date_next_reset}"
+
+    used_bw_pct = used_bw / total_bw
+    used_bw_pct_str = f"{used_bw_pct:.0%}"
+
+    # convert to human readable format
+    used_bw_str = f"{humanize.naturalsize(used_bw)}"
+    #print(f"{used_bw_str}")
+    total_bw_str = f"{humanize.naturalsize(total_bw)}"
+ 
+    return servicename + "\n" + used_bw_str + "/" + total_bw_str +", " + used_bw_pct_str + "\n" + date_next_reset_str
+
+@app.task
+def get_bandwagon_data_usage(data):
+    hostname = data['hostname']
+    hostname_str = f"{hostname}"
+    
+    used_bw = data['data_counter']
+    total_bw = data['plan_monthly_data'] * data['monthly_data_multiplier']
+    date_next_reset = data['data_next_reset']
+
+    used_bw_pct = used_bw / total_bw
+    used_bw_pct_str = f"{used_bw_pct:.0%}"
+
+    # convert to human readable format
+    used_bw_str = f"{humanize.naturalsize(used_bw, True)}"
+    #print(f"{used_bw_str}")
+    total_bw_str = f"{humanize.naturalsize(total_bw, True)}"
+    #print(f"{total_bw_str}")
+
+    tz = pytz.timezone(os.getenv("TIMEZONE"))
+    dt_utc = datetime.utcfromtimestamp(date_next_reset)
+    dt_local = dt_utc.replace(tzinfo=pytz.utc).astimezone(tz)
+    dt_local_str = f'Date Next Reset: {dt_local.strftime("%d %B, %Y, %H:%M")}'
+    
+    #print(f'{dt_local_str}')
+
+    return hostname_str + "\n" + used_bw_str + "/" + total_bw_str +", " + used_bw_pct_str + "\n" + dt_local_str
+
+@app.task
+def call_rest_api_usage(url, params):
+    try:
+        with requests.get(url, params=params) as response:
+            if response.status_code == 200:
+                if 'application/json' in response.headers.get('Content-Type'):
+                    data = response.json()
+                    #print(data)
+                else:
+                    print(response.text)
+                return response.json()
+    except RequestException as e:
+        print(f"An error occured: {e}")
+        response.close()
+
+
 @bot.message_handler(commands=["start", "help"])
 def start(message):
     if message.text.startswith("/help"):
@@ -131,7 +216,25 @@ def start(message):
         bot.reply_to(message, "Just start chatting to the AI or enter /help for other commands")
 
 
+@bot.message_handler(commands=["model", "temperature", "maxtokens"])
+def update_model(message):
+    print()
 
+@bot.message_handler(commands=['vps'])
+def get_vps_data_usage(message):
+    """
+    retrieve vps data usage
+    """
+    #print(f"url = {bandwagon_url}", f"params = {bandwagon_params}")
+    bwg_rlt = call_rest_api_usage.delay(bandwagon_url, bandwagon_params) 
+
+    jms_rlt = call_rest_api_usage.delay(jms_url, jms_params)
+    
+    #print(f"{result.get()}")
+    bot.reply_to(message, get_bandwagon_data_usage(bwg_rlt.get()) + '\n\n' +
+                 get_jms_data_usage(jms_rlt.get()))
+
+    
 @bot.message_handler(func=lambda message: True)
 def echo_message(message):
     user_id = message.chat.id
