@@ -1,5 +1,5 @@
 import os
-
+import time
 from openai import OpenAI
 from dotenv import load_dotenv
 import telebot
@@ -9,6 +9,7 @@ from requests.exceptions import RequestException
 import humanize
 import pytz
 from datetime import datetime
+import arxiv
 
 load_dotenv()
 app = Celery('chatbot', broker=os.getenv('CELERY_BROKER_URL'))
@@ -25,6 +26,7 @@ jms_params = {
     'id': os.getenv('JMS_ID')
 }
 
+pdf_path = os.getenv('PDF_PATH')
 
 openapi_key = os.getenv('OPEN_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -38,7 +40,14 @@ client = OpenAI(
 # Store the last 10 conversations for each user
 conversations = {}
 # dict to store chat model parameters
-chat_paras = {}
+chat_params = {
+    'model': 'gpt-3.5-turbo',
+    'temperature': 0.7,
+    'max_tokens': 1024,
+    'top_p': 1,
+    'frequency_penalty': 0,
+    'presence_penalty': 0     
+}
 
 
 SYSTEM_PROMPT = os.getenv('SYSTEM_PROMPT')
@@ -192,6 +201,15 @@ def get_bandwagon_data_usage(data):
 
 @app.task
 def call_rest_api_usage(url, params):
+    """helper function to call rest api 
+
+    Args:
+        url (str): urlof the rest api
+        params (args): parameters for the rest api
+
+    Returns:
+        _type_: _description_
+    """
     try:
         with requests.get(url, params=params) as response:
             if response.status_code == 200:
@@ -204,6 +222,47 @@ def call_rest_api_usage(url, params):
     except RequestException as e:
         print(f"An error occured: {e}")
         response.close()
+
+@app.task
+def call_download_arxiv_pdf(paperID, dir):
+    """_summary_
+    task: download the pdf of the arXiv paper
+
+    Args:
+        paperID (str): e.g. 2403.03186
+        dir (str): path with '/' end
+    """
+    try:
+        print(f'Paper ID: {paperID} \n Directory: {dir}')
+        paper = next(arxiv.Client().results(arxiv.Search(id_list=[paperID])))
+        #print(f"Summary: {paper.summary}")
+        filename = dir + paperID + '.pdf'
+
+        # generate summary file
+        summary_file = dir + paperID + '_info.txt'
+        info_str = ''
+        # skip if the file already exists
+        if not os.path.exists(summary_file):
+            with open(summary_file, 'w', encoding='utf-8') as file:
+                info_str += 'title, '+ paper.title + '\n'
+                info_str += ('url, ' + paper.pdf_url) + '\n'
+                info_str += 'author, '
+                for author in paper.authors:
+                    info_str += str(author) + ', '
+                info_str += '\n'
+                info_str += ('summary, ' + paper.summary)
+                print(info_str)
+                file.write(info_str)
+
+        # start download pdf
+        paper.download_pdf(filename=filename)
+        return f"Paper downloaded: {filename} \n {info_str}"
+
+    except Exception as e:
+        result = f"Error downloading arXiv PDF: {e}"
+        print(result)
+        return result
+
 
 
 @bot.message_handler(commands=["start", "help"])
@@ -234,9 +293,43 @@ def get_vps_data_usage(message):
     bot.reply_to(message, get_bandwagon_data_usage(bwg_rlt.get()) + '\n\n' +
                  get_jms_data_usage(jms_rlt.get()))
 
-    
+@bot.message_handler(commands=['paper'])
+def dl_arxiv(message):
+    """
+    download pdf from Arxiv by link
+    Args:
+        message (_type_): _description_
+    """
+    reply = ""
+    if message.text.startswith("/paper"):
+        paperID = message.text.replace("/paper", "").strip()
+        if len(paperID) == 0:
+            bot.reply_to(message, 'Usage: /paper {paperID} (e.g. 2403.03186)')
+        print(f"paperID = {paperID}")
+        summary_file = pdf_path + paperID + '_info.txt'
+
+        info_str = ''
+        # skip if the file already exists
+        if os.path.exists(summary_file):
+            print(f"{summary_file} exists")
+            with open(summary_file, 'r', encoding='utf-8') as file:
+                info_str = file.read()
+                print(info_str)
+            reply = info_str
+        else:
+            print(f"start downloading arXiv PDF: {paperID} {pdf_path}")
+            rlt = call_download_arxiv_pdf.delay(paperID, dir=pdf_path)
+            reply = rlt.get()
+        
+    bot.reply_to(message, reply)
+
 @bot.message_handler(func=lambda message: True)
 def echo_message(message):
+    """ echo back the message to the user
+
+    Args:
+        message (str): input message from the user
+    """
     user_id = message.chat.id
 
     # Handle /clear command
@@ -252,4 +345,10 @@ def echo_message(message):
 
 
 if __name__ == "__main__":
-    bot.polling()
+    while True:
+        try:
+            bot.polling(non_stop=True, interval=0)
+        except Exception as e:
+            print(e)
+            time.sleep(5)
+            continue
