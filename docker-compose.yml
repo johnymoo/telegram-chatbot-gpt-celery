@@ -1,0 +1,19 @@
+services:
+  telegram-chatbot-celery:
+    container_name: chatbot_telegram_worker
+    image: telegram-chatbot-celery
+    #network_mode: "host" # Equivalent to --network="host"
+    env_file: .env
+    environment:
+      TZ: Asia/Shanghai
+    command: celery -A chatbot worker --loglevel=info
+
+  app:
+    container_name: chatbot_telegram_app
+    image: telegram-chatbot-celery
+    command: python chatbot.py
+    env_file: .env
+    environment:
+      TZ: Asia/Shanghai
+    depends_on:
+      - telegram-chatbot-celery

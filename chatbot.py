@@ -10,8 +10,43 @@ import humanize
 import pytz
 from datetime import datetime
 import arxiv
+from pyzotero import zotero
+import requests
+import json
+import hashlib
+import logging  # Import the logging module
 
 load_dotenv()
+
+import logging
+import sys
+
+# Configure logging to output to stdout
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Debug: Print environment variables
+#print("Environment variables:")
+#print(f"PDF_PATH: {os.getenv('PDF_PATH')}")
+#print(f"ZOTERO_LIBRARY_ID: {os.getenv('ZOTERO_LIBRARY_ID')}")
+#print(f"ZOTERO_API_KEY: {os.getenv('ZOTERO_API_KEY')}")
+#print(f"TIMEZONE: {os.getenv('TIMEZONE')}")
+
+# Initialize Zotero client
+try:
+    zot = zotero.Zotero(
+        library_id=os.getenv('ZOTERO_LIBRARY_ID'),
+        library_type='user',
+        api_key=os.getenv('ZOTERO_API_KEY')
+    )
+    logger.info("Successfully initialized Zotero client")
+except Exception as e:
+    logger.error(f"Error initializing Zotero client: {str(e)}")
+
 app = Celery('chatbot', broker=os.getenv('CELERY_BROKER_URL'))
 
 bandwagon_url = os.getenv('BANDWAGON_URL')
@@ -32,10 +67,7 @@ openapi_key = os.getenv('OPEN_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-client = OpenAI(
-    # This is the default and can be omitted
-    api_key= openapi_key
-)
+client = OpenAI(api_key=openapi_key)
 
 # Store the last 10 conversations for each user
 conversations = {}
@@ -120,13 +152,13 @@ def handle_image(message):
         prompt = message.text.replace("/image", "").strip()
     else:
         prompt = message.text.replace("/create", "").strip()
-    print(f"message= {message.text}")
-    print(f"prompt = {prompt}")
+    logger.info(f"message= {message.text}")
+    logger.info(f"prompt = {prompt}")
     numbers = 1 # Dall-E-3 api only support number = 1
     task = generate_image.apply_async(args=[prompt, numbers])
     image_url = task.get()
     if image_url is not None:
-        print(f"chat_id= {message.chat.id} \nphoto = {image_url}\n " +
+        logger.info(f"chat_id= {message.chat.id} \nphoto = {image_url}\n " +
                 f"caption = {caption}")
         bot.send_photo(chat_id=message.chat.id, photo=image_url, reply_to_message_id=message.message_id,
                         caption=prompt, parse_mode='Markdown')
@@ -220,7 +252,7 @@ def call_rest_api_usage(url, params):
                     print(response.text)
                 return response.json()
     except RequestException as e:
-        print(f"An error occured: {e}")
+        logger.error(f"An error occured: {e}")
         response.close()
 
 @app.task
@@ -233,7 +265,7 @@ def call_download_arxiv_pdf(paperID, dir):
         dir (str): path with '/' end
     """
     try:
-        print(f'Paper ID: {paperID} \n Directory: {dir}')
+        logger.info(f'Paper ID: {paperID} \n Directory: {dir}')
         paper = next(arxiv.Client().results(arxiv.Search(id_list=[paperID])))
         #print(f"Summary: {paper.summary}")
         filename = dir + paperID + '.pdf'
@@ -244,14 +276,13 @@ def call_download_arxiv_pdf(paperID, dir):
         # skip if the file already exists
         if not os.path.exists(summary_file):
             with open(summary_file, 'w', encoding='utf-8') as file:
-                info_str += 'title, '+ paper.title + '\n'
-                info_str += ('url, ' + paper.pdf_url) + '\n'
-                info_str += 'author, '
-                for author in paper.authors:
-                    info_str += str(author) + ', '
-                info_str += '\n'
-                info_str += ('summary, ' + paper.summary)
-                print(info_str)
+                info_str += 'title, ' + paper.title + '\n'
+                info_str += 'url, ' + paper.pdf_url + '\n'
+                # Join authors with commas and add trailing newline
+                authors = ', '.join(str(author) for author in paper.authors)
+                info_str += 'author, ' + authors + '\n'
+                info_str += 'summary, ' + paper.summary
+                logger.info(info_str)
                 file.write(info_str)
 
         # start download pdf
@@ -260,15 +291,14 @@ def call_download_arxiv_pdf(paperID, dir):
 
     except Exception as e:
         result = f"Error downloading arXiv PDF: {e}"
-        print(result)
+        logger.error(result)
         return result
-
 
 
 @bot.message_handler(commands=["start", "help"])
 def start(message):
     if message.text.startswith("/help"):
-        bot.reply_to(message, "/image to generate image animation\n/create generate image\n/clear - Clears old "
+        bot.reply_to(message, "/image to generate image animation\n/create generate image\n/paper {paperID} - Download arXiv paper and upload to Zotero\n/clear - Clears old "
                               "conversations\nsend text to get replay\nsend voice to do voice"
                               "conversation")
     else:
@@ -277,7 +307,8 @@ def start(message):
 
 @bot.message_handler(commands=["model", "temperature", "maxtokens"])
 def update_model(message):
-    print()
+    """Update model parameters"""
+    bot.reply_to(message, "Model update not implemented")
 
 @bot.message_handler(commands=['vps'])
 def get_vps_data_usage(message):
@@ -317,11 +348,244 @@ def dl_arxiv(message):
                 print(info_str)
             reply = info_str
         else:
-            print(f"start downloading arXiv PDF: {paperID} {pdf_path}")
+            logger.info(f"start downloading arXiv PDF: {paperID} {pdf_path}")
             rlt = call_download_arxiv_pdf.delay(paperID, dir=pdf_path)
             reply = rlt.get()
         
     bot.reply_to(message, reply)
+        
+    # After successful download, try to upload to Zotero
+    # if reply.startswith("Paper downloaded:"):
+    #     upload_result = upload_pdf_zotero.delay(paperID)
+    #     bot.reply_to(message, upload_result.get())
+
+@app.task
+def test_upload_zotero(paper_id):
+    pdffile = ("2311.02883.pdf", "/mnt/books/Books/GPT")
+    response = zot.attachment_simple(["/mnt/books/Books/GPT/2311.02883.pdf"], "K93PPGZ7")
+    #response = zot.attachment_both([pdffile], "K93PPGZ7")
+    logger.info(response)
+
+@app.task
+def upload_pdf_zotero(paper_id):
+    """Upload a PDF file to Zotero library
+    
+    Args:
+        paper_id (str): arXiv paper ID (e.g. 2403.03186)
+    
+    Returns:
+        str: Success/failure message
+    """
+    try:
+        # Check if PDF exists
+        pdf_file = pdf_path + paper_id + '.pdf'
+        if not os.path.exists(pdf_file):
+            logger.error(f"Error: PDF file not found at {pdf_file}")
+            return f"Error: PDF file not found at {pdf_file}"
+
+        # Get paper metadata from info file
+        info_file = pdf_path + paper_id + '_info.txt'
+        if not os.path.exists(info_file):
+            return f"Error: Paper info file not found at {info_file}"
+            
+        # Read and parse metadata
+        with open(info_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Parse metadata with fixed order: title, url, author, summary
+        lines = content.split('\n')
+
+        # First three lines are title, url, author
+        title_key, title_value = lines[0].split(',', 1)
+        url_key, url_value = lines[1].split(',', 1)
+        author_key, author_value = lines[2].split(',', 1)
+
+        metadata = {
+            title_key.strip(): title_value.strip(),
+            url_key.strip(): url_value.strip(),
+            author_key.strip(): author_value.strip(),
+        }
+
+        # Everything after the third line is the summary
+        summary_key, summary_first_line = lines[3].split(',', 1)
+        metadata[summary_key.strip()] = '\n'.join([summary_first_line] + lines[4:]).strip()
+
+        logger.info("Parsed metadata:")
+        for key, value in metadata.items():
+            logger.info(f"{key}: {value[:50]}...")
+
+        logger.info("Final metadata:", metadata)
+
+        # Verify required metadata fields
+        required_fields = ['title', 'summary', 'url', 'author']
+        for field in required_fields:
+            if field not in metadata:
+                raise Exception(f"Missing required metadata field: {field}")
+
+        # Create Zotero item
+        logger.info("Creating Zotero item template")
+        template = zot.item_template('journalArticle')
+        template['title'] = metadata.get('title', '')
+        template['abstractNote'] = metadata.get('summary', '')
+        template['url'] = metadata.get('url', '')
+        # Parse authors and split into firstName/lastName
+        authors = metadata['author'].strip().rstrip(',').split(',')
+        template['creators'] = []
+        for author in authors:
+            if author.strip():
+                # Split name into parts
+                name_parts = author.strip().split()
+                if len(name_parts) > 1:
+                    template['creators'].append({
+                        'creatorType': 'author',
+                        'firstName': ' '.join(name_parts[:-1]),
+                        'lastName': name_parts[-1]
+                    })
+                else:
+                    template['creators'].append({
+                        'creatorType': 'author',
+                        'firstName': '',
+                        'lastName': name_parts[0]
+                    })
+        logger.info(f"Authors parsed: {template['creators']}")
+
+        logger.info("Uploading metadata to Zotero")
+       # Upload item metadata first
+        item = zot.create_items([template])
+        logger.info(item)
+        if not item or not item["success"]:
+            raise Exception("Failed to create Zotero item")
+
+        item = item["success"]
+        logger.info(f"item created: {item['0']}")
+        # # Then attach PDF
+        #print(f"Attaching PDF: {pdf_file}")
+        pdf_files = [pdf_file]
+        logger.info(f"Attaching PDF: {pdf_files}")
+        # response = zot.attachment_simple(
+        #         pdf_files,
+        #         item["0"]
+        #     )
+        response = zot.attachment_simple(["/mnt/books/Books/GPT/2311.02883.pdf"], "K93PPGZ7")
+        # # with open(pdf_file, 'rb') as pdf:
+        #     zot.attachment_simple(
+        #         pdf,
+        #         item,
+        #         filename=f"{paper_id}.pdf"
+        #     )
+        logger.info(response)
+        if response and 'successful' in response:
+            logger.info("PDF uploaded successfully as a standalone item!")
+        else:
+            logger.info("Failed to upload PDF:", response)
+        #print(f"Successfully uploaded to Zotero: {paper_id}")
+        return f"Successfully uploaded {paper_id} to Zotero"
+
+    except Exception as e:
+        return f"Error uploading to Zotero: {str(e)}"
+
+def upload_pdf_to_zotero(pdf_path, collection_key=None):
+    """
+    Uploads a PDF file to Zotero using the Zotero API.
+
+    Args:
+        pdf_path (str): Path to the PDF file.
+        collection_key (str, optional): Key of the Zotero collection to upload to. Defaults to None (My Library).
+
+    Returns:
+        dict: The response from the Zotero API, or None if an error occurred.
+    """
+    api_key = os.getenv('ZOTERO_API_KEY')
+    user_id = os.getenv('ZOTERO_LIBRARY_ID')
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            pdf_data = pdf_file.read()
+
+        filename = os.path.basename(pdf_path)
+        filesize = len(pdf_data)
+        filehash = hashlib.sha1(pdf_data).hexdigest()
+
+        headers = {
+            'Zotero-API-Key': api_key,
+            'Zotero-API-Version': '3',
+            'Content-Type': 'application/json',
+        }
+
+        url = f'https://api.zotero.org/users/{user_id}/items'
+
+        if collection_key:
+            url = f'https://api.zotero.org/collections/{collection_key}/items'
+
+        # First, create an item with file metadata
+        item_data = {
+            'itemType': 'attachment',
+            'linkMode': 'imported_file',
+            'filename': filename,
+            "contentType": "application/pdf",
+        }
+
+        response = requests.post(url, headers=headers, json=[item_data]) #send as a list
+        response.raise_for_status()
+
+        response_json = response.json()
+        if not response_json:
+            print("Error: No JSON response from Zotero API during item creation.")
+            return None
+        if not isinstance(response_json, list) or not response_json: # check if response is a list and not empty
+            print(f"Error: unexpected response structure: {response_json}")
+            return None
+
+        upload_url = response_json[0]['data']['url']
+        upload_auth = response_json[0]['data']['authorization']
+
+        # Second, upload the file to the provided URL
+        upload_headers = {
+            'Authorization': upload_auth,
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': f'attachment; filename="{filename}"',
+        }
+
+        upload_response = requests.put(upload_url, headers=upload_headers, data=pdf_data)
+        upload_response.raise_for_status()
+
+        # Third, confirm the upload
+        confirm_url = f'https://api.zotero.org/users/{user_id}/items/{response_json[0]["data"]["key"]}'
+        confirm_headers = {
+            'Zotero-API-Key': api_key,
+            'Zotero-API-Version': '3',
+            'If-Match': response.headers['ETag'],
+        }
+
+        confirm_data = {
+            "itemType": "attachment",
+            "linkMode": "imported_file",
+            "filename": filename,
+            "filesize": filesize,
+            "filehash": filehash,
+            "contentType": "application/pdf"
+
+        }
+
+        confirm_response = requests.patch(confirm_url, headers=confirm_headers, json=confirm_data)
+        confirm_response.raise_for_status()
+
+        return confirm_response.json()
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error uploading PDF: {e}")
+        if 'response' in locals() and response is not None:
+            print(f"Response Content: {response.content}")
+        return None
+    except FileNotFoundError:
+        print(f"Error: PDF file not found at {pdf_path}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON response from Zotero API. Response: {response.text}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return None
+        
 
 @bot.message_handler(func=lambda message: True)
 def echo_message(message):
@@ -347,8 +611,14 @@ def echo_message(message):
 if __name__ == "__main__":
     while True:
         try:
-            bot.polling(non_stop=True, interval=0)
+            logger.info("start polling telegram bot..")
+            bot.polling(non_stop=True, interval=1)
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received. Exiting...")
+            break
         except Exception as e:
             print(e)
             time.sleep(5)
             continue
+        finally:
+            logger.info("polling exited")

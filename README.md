@@ -26,18 +26,17 @@ This repository contains an example of a Telegram chatbot integrated with OpenAI
 - Set the following environment variables:
    - `TELEGRAM_BOT_TOKEN`: Your Telegram Bot Token
    - `OPENAI_API_KEY`: Your OpenAI API Key
-  
-- Start the Redis server:
-    `redis-server`
 
-- Start the Celery worker:
+- Build the Docker image:
     ```
-    celery -A chatbot worker --loglevel=info
+    docker build -t telegram-chatbot-celery .
     ```
-- Run the script:
+
+- Start the Docker container:
     ```
-    python chatbot.py
+    docker-compose up -d
     ```
+
 - Start a conversation with your Telegram bot!
 
 
@@ -49,12 +48,43 @@ This repository contains an example of a Telegram chatbot integrated with OpenAI
   example: /image 2 cats walking in space
   ```
 
+## Zotero Integration
+
+The project includes a Zotero client that supports PDF file uploads. To use the Zotero functionality:
+
+1. Get your Zotero API key from https://www.zotero.org/settings/keys
+2. Get your userID from https://www.zotero.org/settings/keys (shown at the top of the page)
+3. Set the following environment variables:
+   - `ZOTERO_API_KEY`: Your Zotero API key
+   - `ZOTERO_USER_ID`: Your Zotero user ID
+
+Example usage of the Zotero client:
+
+```python
+from zotero_client import ZoteroClient
+
+# Initialize the client
+client = ZoteroClient(
+    api_key='your_api_key',
+    library_type='user',  # or 'group' for group libraries
+    library_id='your_user_id'
+)
+
+# Upload a PDF file
+response = client.upload_pdf('path/to/your/file.pdf')
+
+# Upload a PDF and attach it to an existing Zotero item
+response = client.upload_pdf('path/to/your/file.pdf', item_key='existing_item_key')
+```
+
+The client handles:
+- Getting upload authorization from Zotero
+- Uploading the file to Zotero's storage service
+- Registering the upload with Zotero
+
 ## Contributing
 
 This is just a starting point and there's always room for improvement. If you have any ideas or suggestions, feel free to open an issue or submit a pull request.
 
 ## License
 This project is licensed under the MIT License. See the LICENSE file for details.
-
-
-
