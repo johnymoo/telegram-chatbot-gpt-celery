@@ -4,6 +4,9 @@ services:
     image: telegram-chatbot-celery
     #network_mode: "host" # Equivalent to --network="host"
     env_file: .env
+    user: "${UID}:${GID}"
+    volumes:
+      - '${PDF_PATH}:/pdf'
     environment:
       TZ: Asia/Shanghai
     command: celery -A chatbot worker --loglevel=info
@@ -13,7 +16,10 @@ services:
     image: telegram-chatbot-celery
     command: python chatbot.py
     env_file: .env
+    user: "${UID}:${GID}"
     environment:
       TZ: Asia/Shanghai
+    volumes:
+      - '${PDF_PATH}:/pdf'
     depends_on:
       - telegram-chatbot-celery

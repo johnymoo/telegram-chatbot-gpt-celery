@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 import telebot
@@ -61,7 +62,18 @@ jms_params = {
     'id': os.getenv('JMS_ID')
 }
 
-pdf_path = os.getenv('PDF_PATH')
+def is_running_in_docker():
+    """
+    Detect if the application is running inside a Docker container.
+    Returns True if running in Docker, False otherwise.
+    """
+    # Method 1: Check for .dockerenv file
+    if Path('/.dockerenv').exists():
+        return True
+
+pdf_path = Path(os.getenv('PDF_PATH', ''))
+if is_running_in_docker():
+    pdf_path = Path('/pdf') # for docker use
 
 openapi_key = os.getenv('OPEN_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -262,19 +274,20 @@ def call_download_arxiv_pdf(paperID, dir):
 
     Args:
         paperID (str): e.g. 2403.03186
-        dir (str): path with '/' end
+        dir (str): path or Path object for the directory
     """
     try:
-        logger.info(f'Paper ID: {paperID} \n Directory: {dir}')
+        dir_path = Path(dir)
+        logger.info(f'Paper ID: {paperID} \n Directory: {dir_path}')
         paper = next(arxiv.Client().results(arxiv.Search(id_list=[paperID])))
         #print(f"Summary: {paper.summary}")
-        filename = dir + paperID + '.pdf'
+        filename = dir_path / f"{paperID}.pdf"
 
         # generate summary file
-        summary_file = dir + paperID + '_info.txt'
+        summary_file = dir_path / f"{paperID}_info.txt"
         info_str = ''
         # skip if the file already exists
-        if not os.path.exists(summary_file):
+        if not summary_file.exists():
             with open(summary_file, 'w', encoding='utf-8') as file:
                 info_str += 'title, ' + paper.title + '\n'
                 info_str += 'url, ' + paper.pdf_url + '\n'
@@ -286,7 +299,7 @@ def call_download_arxiv_pdf(paperID, dir):
                 file.write(info_str)
 
         # start download pdf
-        paper.download_pdf(filename=filename)
+        paper.download_pdf(filename=str(filename))
         return f"Paper downloaded: {filename} \n {info_str}"
 
     except Exception as e:
@@ -337,11 +350,11 @@ def dl_arxiv(message):
         if len(paperID) == 0:
             bot.reply_to(message, 'Usage: /paper {paperID} (e.g. 2403.03186)')
         print(f"paperID = {paperID}")
-        summary_file = pdf_path + paperID + '_info.txt'
+        summary_file = pdf_path / f"{paperID}_info.txt"
 
         info_str = ''
         # skip if the file already exists
-        if os.path.exists(summary_file):
+        if summary_file.exists():
             print(f"{summary_file} exists")
             with open(summary_file, 'r', encoding='utf-8') as file:
                 info_str = file.read()
@@ -349,7 +362,7 @@ def dl_arxiv(message):
             reply = info_str
         else:
             logger.info(f"start downloading arXiv PDF: {paperID} {pdf_path}")
-            rlt = call_download_arxiv_pdf.delay(paperID, dir=pdf_path)
+            rlt = call_download_arxiv_pdf.delay(paperID, dir=str(pdf_path))
             reply = rlt.get()
         
     bot.reply_to(message, reply)
@@ -361,8 +374,8 @@ def dl_arxiv(message):
 
 @app.task
 def test_upload_zotero(paper_id):
-    pdffile = ("2311.02883.pdf", "/mnt/books/Books/GPT")
-    response = zot.attachment_simple(["/mnt/books/Books/GPT/2311.02883.pdf"], "K93PPGZ7")
+    pdf_path = Path("/mnt/books/Books/GPT") / "2311.02883.pdf"
+    response = zot.attachment_simple([str(pdf_path)], "K93PPGZ7")
     #response = zot.attachment_both([pdffile], "K93PPGZ7")
     logger.info(response)
 
@@ -378,14 +391,14 @@ def upload_pdf_zotero(paper_id):
     """
     try:
         # Check if PDF exists
-        pdf_file = pdf_path + paper_id + '.pdf'
-        if not os.path.exists(pdf_file):
+        pdf_file = pdf_path / f"{paper_id}.pdf"
+        if not pdf_file.exists():
             logger.error(f"Error: PDF file not found at {pdf_file}")
             return f"Error: PDF file not found at {pdf_file}"
 
         # Get paper metadata from info file
-        info_file = pdf_path + paper_id + '_info.txt'
-        if not os.path.exists(info_file):
+        info_file = pdf_path / f"{paper_id}_info.txt"
+        if not info_file.exists():
             return f"Error: Paper info file not found at {info_file}"
             
         # Read and parse metadata
@@ -463,10 +476,11 @@ def upload_pdf_zotero(paper_id):
         pdf_files = [pdf_file]
         logger.info(f"Attaching PDF: {pdf_files}")
         # response = zot.attachment_simple(
-        #         pdf_files,
+        #         [str(pdf_file)],
         #         item["0"]
         #     )
-        response = zot.attachment_simple(["/mnt/books/Books/GPT/2311.02883.pdf"], "K93PPGZ7")
+        test_pdf_path = Path("/mnt/books/Books/GPT") / "2311.02883.pdf"
+        response = zot.attachment_simple([str(test_pdf_path)], "K93PPGZ7")
         # # with open(pdf_file, 'rb') as pdf:
         #     zot.attachment_simple(
         #         pdf,
@@ -484,12 +498,12 @@ def upload_pdf_zotero(paper_id):
     except Exception as e:
         return f"Error uploading to Zotero: {str(e)}"
 
-def upload_pdf_to_zotero(pdf_path, collection_key=None):
+def upload_pdf_to_zotero(pdf_path_str, collection_key=None):
     """
     Uploads a PDF file to Zotero using the Zotero API.
 
     Args:
-        pdf_path (str): Path to the PDF file.
+        pdf_path_str (str): Path to the PDF file.
         collection_key (str, optional): Key of the Zotero collection to upload to. Defaults to None (My Library).
 
     Returns:
@@ -498,10 +512,11 @@ def upload_pdf_to_zotero(pdf_path, collection_key=None):
     api_key = os.getenv('ZOTERO_API_KEY')
     user_id = os.getenv('ZOTERO_LIBRARY_ID')
     try:
+        pdf_path = Path(pdf_path_str)
         with open(pdf_path, 'rb') as pdf_file:
             pdf_data = pdf_file.read()
 
-        filename = os.path.basename(pdf_path)
+        filename = pdf_path.name
         filesize = len(pdf_data)
         filehash = hashlib.sha1(pdf_data).hexdigest()
 
